@@ -24,12 +24,10 @@ func main() {
 		Handler: r,
 	}
 
-	go func() {
-		log.Println("Starting server on port 4041...")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Error starting server: %v", err)
-		}
-	}()
+	log.Println("*********Starting server on port 8080*********")
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Error starting server: %v", err)
+	}
 
 	for _, route := range r.Routes() {
 		log.Printf("Method: %s, Path: %s", route.Method, route.Path)

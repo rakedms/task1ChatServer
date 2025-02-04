@@ -3,6 +3,7 @@ package models
 type User struct {
 	ID                   string
 	DisplayName          string
+	ChatRooms            []string
 	BroadcastMessageChan chan string
 	PrivateMessageChan   chan string
 }

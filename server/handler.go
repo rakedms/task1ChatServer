@@ -119,21 +119,44 @@ func (s *ChatServer) SendPrivateMessage(c *gin.Context) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
 	_, FromUserExists := s.users[req.FromUserID]
+	ToUser, ToUserExists := s.users[req.ToUserID]
+
+	s.mu.Unlock()
 	if !FromUserExists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user who sends message doesn't exists"})
 		return
 	}
-	ToUser, ToUserExists := s.users[req.FromUserID]
 
 	if !ToUserExists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user who receives message doesn't exists"})
 		return
 	}
 
+	log.Printf("Sending message from %s to %s: %s", req.FromUserID, req.ToUserID, req.Message)
 	ToUser.PrivateMessageChan <- fmt.Sprintf("from: %s, message: %s", req.FromUserID, req.Message)
+	log.Println("Message successfully sent to channel")
 	c.JSON(http.StatusOK, gin.H{"message": "Message sent"})
+}
+
+func (s *ChatServer) GetUserRooms(c *gin.Context) {
+	userID := c.Param("userID")
+
+	s.mu.Lock()
+	user, exists := s.users[userID]
+	s.mu.Unlock()
+
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	rooms := user.ChatRooms
+	c.JSON(http.StatusOK, gin.H{
+		"rooms": rooms,
+	})
+
 }
 
 func (s *ChatServer) GetMessagesFromAllRooms(c *gin.Context) {
@@ -159,20 +182,19 @@ func (s *ChatServer) GetMessagesFromAllRooms(c *gin.Context) {
 		return
 	}
 
-	notify := c.Writer.CloseNotify()
+	notify := c.Request.Context().Done()
 
-	go func() {
-		for {
-			select {
-			case msg := <-user.BroadcastMessageChan:
-				fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
-				flusher.Flush()
-			case <-notify:
-				log.Println("Client closed connection")
-				return
-			}
+	for {
+		select {
+		case msg := <-user.BroadcastMessageChan:
+			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-notify:
+			log.Println("Client closed connection")
+			return
 		}
-	}()
+	}
+
 }
 
 func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
@@ -198,33 +220,41 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 		return
 	}
 
-	notify := c.Writer.CloseNotify()
+	notify := c.Request.Context().Done()
 
-	go func() {
-		for {
-			select {
-			case msg := <-user.PrivateMessageChan:
-				fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
-				flusher.Flush()
-			case <-notify:
-				log.Println("Client closed connection")
-				return
-			}
+	log.Printf("Client connected for user: %s", userID)
+
+	for {
+		select {
+		case msg := <-user.PrivateMessageChan:
+			fmt.Println("*************received msg*************")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-notify:
+			log.Println("Client closed connection")
+			return
 		}
-	}()
+
+	}
+
 }
 
 func (s *ChatServer) GetChatRoomContents(c *gin.Context) {
 	userID := c.Param("userID")
-	roomID := c.Param("roomID")
+	roomName := c.Param("roomName")
 
 	s.mu.Lock()
 	_, exists := s.users[userID]
-	room, roomExists := s.rooms[roomID]
+	room, roomExists := s.rooms[roomName]
 	s.mu.Unlock()
 
-	if !exists || !roomExists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User or Room not found"})
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	if !roomExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
 		return
 	}
 
@@ -238,52 +268,32 @@ func (s *ChatServer) GetChatRoomContents(c *gin.Context) {
 		return
 	}
 
-	notify := c.Writer.CloseNotify()
+	notify := c.Request.Context().Done()
 
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		initialMessages, err := json.Marshal(room.Messages)
-		if err == nil {
-			fmt.Fprintf(c.Writer, "data: %s\n\n", initialMessages)
+	for {
+		select {
+		case newMessage := <-room.RoomMessages:
+			fmt.Println("new message: ", newMessage)
+			// messagesJSON, err := json.Marshal(room.Messages)
+			// if err != nil {
+			// 	log.Println("Error converting members to JSON:", err)
+			// 	return
+			// }
+			fmt.Fprintf(c.Writer, "data: %s\n\n", newMessage)
 			flusher.Flush()
-		} else {
-			log.Println("Error marshaling messages:", err)
-		}
-		initialMembers, err := json.Marshal(room.Members)
-		if err == nil {
-			fmt.Fprintf(c.Writer, "users: %s\n\n", initialMembers)
-			flusher.Flush()
-		} else {
-			log.Println("Error marshaling members:", err)
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case _ = <-room.RoomMessages:
-				messagesJSON, err := json.Marshal(room.Messages)
-				if err != nil {
-					log.Println("Error converting members to JSON:", err)
-					return
-				}
-				fmt.Fprintf(c.Writer, "data: %s\n\n", messagesJSON)
-				flusher.Flush()
-			case _ = <-room.NewUserSignal:
-				membersJSON, err := json.Marshal(room.Members)
-				if err != nil {
-					log.Println("Error converting members to JSON:", err)
-					return
-				}
-				fmt.Fprintf(c.Writer, "users: %s\n\n", membersJSON)
-				flusher.Flush()
-			case <-notify:
-				log.Println("Client closed connection")
+		case userAddSig := <-room.NewUserSignal:
+			fmt.Println("user added in room", userAddSig)
+			membersJSON, err := json.Marshal(room.Members)
+			if err != nil {
+				log.Println("Error converting members to JSON:", err)
 				return
 			}
+			fmt.Fprintf(c.Writer, "users: %s\n\n", membersJSON)
+			flusher.Flush()
+		case <-notify:
+			log.Println("Client closed connection")
+			return
 		}
-	}()
+	}
 
 }
