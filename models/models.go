@@ -11,7 +11,7 @@ type User struct {
 type Room struct {
 	Name          string
 	NewUserSignal chan struct{}
-	Members       map[string]*User
-	Messages      map[string]string
+	Members       []string
+	Messages      []string
 	RoomMessages  chan string
 }

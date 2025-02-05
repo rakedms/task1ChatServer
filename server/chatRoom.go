@@ -17,11 +17,11 @@ func (s *ChatServer) JoinRoom(user *models.User, roomName string) {
 
 	chatRoom, exists := s.rooms[roomName]
 	if exists {
-		chatRoom.Members[user.ID] = user
+		chatRoom.Members = append(chatRoom.Members, user.ID)
 		chatRoom.NewUserSignal <- struct{}{}
 		user.ChatRooms = append(user.ChatRooms, roomName)
 	} else {
-		room := &models.Room{Name: roomName, Members: make(map[string]*models.User), NewUserSignal: make(chan struct{}), RoomMessages: make(chan string, 10)}
+		room := &models.Room{Name: roomName, Members: []string{user.ID}, NewUserSignal: make(chan struct{}), RoomMessages: make(chan string, 10)}
 		s.rooms[roomName] = room
 		user.ChatRooms = append(user.ChatRooms, roomName)
 	}

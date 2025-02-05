@@ -91,14 +91,15 @@ func (s *ChatServer) SendBroadcastMessage(c *gin.Context) {
 	go func() {
 		defer wg.Done()
 		room.RoomMessages <- fmt.Sprintf("From User: %s, Message: %s", req.UserID, req.Message)
+		room.Messages = append(room.Messages, fmt.Sprintf("From: %s, To Room: %s, MsgId: %s, Message: %s", req.UserID, req.RoomName, msgId, req.Message))
 	}()
 
 	for _, member := range room.Members {
 		wg.Add(1)
-		go func(member *models.User) {
+		go func(member string) {
 			defer wg.Done()
-			member.BroadcastMessageChan <- fmt.Sprintf("From Room: %s, To User: %s, MsgId: %s, Message: %s", room.Name, member.DisplayName, msgId, req.Message)
-			room.Messages[msgId] = fmt.Sprintf("From Room: %s, To User: %s, MsgId: %s, Message: %s", room.Name, member.DisplayName, msgId, req.Message)
+			user := s.users[member]
+			user.BroadcastMessageChan <- fmt.Sprintf("From: %s, To Room: %s, MsgId: %s, Message: %s", req.UserID, req.RoomName, msgId, req.Message)
 		}(member)
 	}
 
@@ -227,7 +228,7 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 	for {
 		select {
 		case msg := <-user.PrivateMessageChan:
-			fmt.Println("*************received msg*************")
+			fmt.Println("*************received pvt msg*************")
 			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
 			flusher.Flush()
 		case <-notify:
@@ -238,6 +239,8 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 	}
 
 }
+
+// this will give all the msgs in the details of the chat room including user id and all messages lively
 
 func (s *ChatServer) GetChatRoomContents(c *gin.Context) {
 	userID := c.Param("userID")
@@ -270,26 +273,39 @@ func (s *ChatServer) GetChatRoomContents(c *gin.Context) {
 
 	notify := c.Request.Context().Done()
 
+	sendRoomState := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		messagesJSON, err := json.Marshal(room.Messages)
+		if err == nil {
+			fmt.Fprintf(c.Writer, "event: message\n")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", messagesJSON)
+			flusher.Flush()
+		} else {
+			log.Println("Error marshaling messages:", err)
+		}
+
+		membersJSON, err := json.Marshal(room.Members)
+		if err == nil {
+			fmt.Fprintf(c.Writer, "event: users\n")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", membersJSON)
+			flusher.Flush()
+		} else {
+			log.Println("Error marshaling members:", err)
+		}
+	}
+
+	sendRoomState()
+
 	for {
 		select {
 		case newMessage := <-room.RoomMessages:
 			fmt.Println("new message: ", newMessage)
-			// messagesJSON, err := json.Marshal(room.Messages)
-			// if err != nil {
-			// 	log.Println("Error converting members to JSON:", err)
-			// 	return
-			// }
-			fmt.Fprintf(c.Writer, "data: %s\n\n", newMessage)
-			flusher.Flush()
+			sendRoomState()
 		case userAddSig := <-room.NewUserSignal:
 			fmt.Println("user added in room", userAddSig)
-			membersJSON, err := json.Marshal(room.Members)
-			if err != nil {
-				log.Println("Error converting members to JSON:", err)
-				return
-			}
-			fmt.Fprintf(c.Writer, "users: %s\n\n", membersJSON)
-			flusher.Flush()
+			sendRoomState()
 		case <-notify:
 			log.Println("Client closed connection")
 			return
