@@ -17,8 +17,8 @@ func (s *ChatServer) CreateUser(displayName string) *models.User {
 		ID:                   GenerateUserID(),
 		DisplayName:          displayName,
 		ChatRooms:            make([]string, 0),
-		BroadcastMessageChan: make(chan string, 20),
-		PrivateMessageChan:   make(chan string, 10),
+		BroadcastMessageChan: make(chan string, 1000),
+		PrivateMessageChan:   make(chan string, 100),
 	}
 
 	s.mu.Lock()

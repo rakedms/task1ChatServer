@@ -4,6 +4,7 @@ type User struct {
 	ID                   string
 	DisplayName          string
 	ChatRooms            []string
+	AllRoomMessages      []string
 	BroadcastMessageChan chan string
 	PrivateMessageChan   chan string
 }
