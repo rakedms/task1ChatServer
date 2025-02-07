@@ -252,12 +252,21 @@ func (s *ChatServer) GetMessagesFromAllRooms(c *gin.Context) {
 
 	totalChan := len(user.BroadcastMessageChan)
 	mergedChan := make(chan string, totalChan*100)
-
+	var wg sync.WaitGroup
 	for _, msgChan := range user.BroadcastMessageChan {
-		for msg := range msgChan {
-			mergedChan <- msg
-		}
+		wg.Add(1)
+		go func(ch chan string) {
+			defer wg.Done()
+			for msg := range msgChan {
+				mergedChan <- msg
+			}
+		}(msgChan)
 	}
+
+	go func() {
+		wg.Wait()
+		close(mergedChan)
+	}()
 
 	for {
 		select {
