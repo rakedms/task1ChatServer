@@ -14,10 +14,12 @@ import (
 )
 
 type ChatServer struct {
-	mu           sync.Mutex
-	rooms        map[string]*models.Room
-	users        map[string]*models.User
-	displayNames map[string]bool
+	mu                 sync.Mutex
+	rooms              map[string]*models.Room
+	users              map[string]*models.User
+	displayNames       map[string]bool
+	clientsPrivateMsgs map[string][]chan string
+	clientsRoomMsgs    map[string][]chan string
 }
 
 func (s *ChatServer) NewConnection(c *gin.Context) {
@@ -130,9 +132,16 @@ func (s *ChatServer) SendBroadcastMessage(c *gin.Context) {
 		wg.Add(1)
 		go func(member string) {
 			defer wg.Done()
+			s.mu.Lock()
 			user := s.users[member]
-			user.BroadcastMessageChan <- fmt.Sprintf("From: %s, To Room: %s, MsgId: %s, Message: %s", req.UserID, req.RoomName, msgId, req.Message)
+			lenOfBroadcastChan := len(user.BroadcastMessageChan)
+			if len(user.BroadcastMessageChan[lenOfBroadcastChan-1]) == cap(user.BroadcastMessageChan[lenOfBroadcastChan-1]) {
+				newMsgChan := make(chan string, 100)
+				user.BroadcastMessageChan = append(user.BroadcastMessageChan, newMsgChan)
+			}
+			user.BroadcastMessageChan[lenOfBroadcastChan-1] <- fmt.Sprintf("From: %s, To Room: %s, MsgId: %s, Message: %s", req.UserID, req.RoomName, msgId, req.Message)
 			user.AllRoomMessages = append(user.AllRoomMessages, fmt.Sprintf("From: %s, To Room: %s, MsgId: %s, Message: %s", req.UserID, req.RoomName, msgId, req.Message))
+			s.mu.Unlock()
 		}(member)
 	}
 
@@ -155,7 +164,9 @@ func (s *ChatServer) SendPrivateMessage(c *gin.Context) {
 	s.mu.Lock()
 
 	_, FromUserExists := s.users[req.FromUserID]
-	ToUser, ToUserExists := s.users[req.ToUserID]
+	toUser, ToUserExists := s.users[req.ToUserID]
+
+	fmt.Println(toUser)
 
 	s.mu.Unlock()
 	if !FromUserExists {
@@ -168,9 +179,13 @@ func (s *ChatServer) SendPrivateMessage(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Sending message from %s to %s: %s", req.FromUserID, req.ToUserID, req.Message)
-	ToUser.PrivateMessageChan <- fmt.Sprintf("from: %s, message: %s", req.FromUserID, req.Message)
-	log.Println("Message successfully sent to channel")
+	for _, msgChan := range toUser.PrivateMsgClient {
+		fmt.Println(175, cap(msgChan))
+		log.Printf("Sending message from %s to %s: %s", req.FromUserID, req.ToUserID, req.Message)
+		msgChan <- fmt.Sprintf("from %s to %s: %s", req.FromUserID, req.ToUserID, req.Message)
+		log.Println("Message successfully sent to channel")
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Message sent"})
 }
 
@@ -235,12 +250,21 @@ func (s *ChatServer) GetMessagesFromAllRooms(c *gin.Context) {
 
 	sendAllRoomMsgs()
 
+	totalChan := len(user.BroadcastMessageChan)
+	mergedChan := make(chan string, totalChan*100)
+
+	for _, msgChan := range user.BroadcastMessageChan {
+		for msg := range msgChan {
+			mergedChan <- msg
+		}
+	}
+
 	for {
 		select {
-		case msg := <-user.BroadcastMessageChan:
-			log.Printf("new msg: %s", msg)
+		case mergedChanMsg := <-mergedChan:
+			log.Printf("new msg: %s", mergedChanMsg)
 			fmt.Fprintf(c.Writer, "event: new msg from a room\n")
-			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", mergedChanMsg)
 			flusher.Flush()
 		case <-notify:
 			log.Println("Client closed connection")
@@ -257,6 +281,9 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 	user, exists := s.users[userID]
 	s.mu.Unlock()
 
+	fmt.Println(user)
+	fmt.Println("cap: ", cap(user.PrivateMsgClient[0]))
+
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
@@ -272,15 +299,42 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streaming unsupported"})
 		return
 	}
+	user.PvtMsgConnections++
 
 	notify := c.Request.Context().Done()
 
-	log.Printf("Client connected for user: %s", userID)
+	if user.PvtMsgConnections > 1 {
+		msgChn := make(chan string, 100)
+		s.mu.Lock()
+		user.PrivateMsgClient = append(user.PrivateMsgClient, msgChn)
+		s.mu.Unlock()
+	}
+	log.Printf("Client connected for user: %s, number of connection is %d", userID, user.PvtMsgConnections)
+
+	mergedChan := make(chan string, 100)
+
+	var wg sync.WaitGroup
+	for _, msgClient := range user.PrivateMsgClient {
+		wg.Add(1)
+		go func(ch chan string) {
+			defer wg.Done()
+			for msg := range ch {
+				mergedChan <- msg
+			}
+		}(msgClient)
+	}
+
+	go func() {
+		wg.Wait()
+		close(mergedChan)
+	}()
 
 	for {
 		select {
-		case msg := <-user.PrivateMessageChan:
-			fmt.Println("*************received pvt msg*************")
+		case msg, ok := <-mergedChan:
+			if !ok {
+				return
+			}
 			fmt.Fprintf(c.Writer, "event: message\n")
 			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
 			flusher.Flush()
@@ -288,7 +342,6 @@ func (s *ChatServer) GetPrivateMessage(c *gin.Context) {
 			log.Println("Client closed connection")
 			return
 		}
-
 	}
 
 }

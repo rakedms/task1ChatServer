@@ -7,9 +7,11 @@ import (
 
 func NewChatServer() *ChatServer {
 	return &ChatServer{
-		rooms:        make(map[string]*models.Room),
-		users:        make(map[string]*models.User),
-		displayNames: make(map[string]bool),
+		rooms:              make(map[string]*models.Room),
+		users:              make(map[string]*models.User),
+		displayNames:       make(map[string]bool),
+		clientsPrivateMsgs: make(map[string][]chan string),
+		clientsRoomMsgs:    make(map[string][]chan string),
 	}
 }
 
